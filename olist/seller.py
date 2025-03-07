@@ -136,13 +136,105 @@ class Seller:
             .sum()\
             .rename(columns={'price': 'sales'})
 
+
+
+
+
+        # Add these methods to the Seller class in seller.py
+
     def get_review_score(self):
         """
         Returns a DataFrame with:
         'seller_id', 'share_of_five_stars', 'share_of_one_stars', 'review_score'
         """
+        # Get reviews data
+        reviews = self.order.get_review_score()
 
-        pass  # YOUR CODE HERE
+        # Get order_items for linking reviews to sellers
+        order_items = self.data['order_items'][['order_id', 'seller_id']].drop_duplicates()
+
+        # Merge to associate reviews with sellers
+        df = order_items.merge(reviews, on='order_id')
+
+        # Calculate aggregated review metrics per seller
+        result = df.groupby('seller_id', as_index=False).agg({
+            'dim_is_one_star': 'mean',  # Share of one-star reviews
+            'dim_is_five_star': 'mean', # Share of five-star reviews
+            'review_score': 'mean'      # Mean review score
+        })
+
+        # Rename columns for clarity
+        result.columns = [
+            'seller_id', 'share_of_one_stars', 'share_of_five_stars', 'review_score'
+        ]
+
+        return result
+
+    def get_review_costs(self):
+        """
+        Returns a DataFrame with:
+        'seller_id', 'cost_of_reviews'
+
+        Calculates the cost of reviews based on the rating:
+        1 star: 100 BRL
+        2 stars: 50 BRL
+        3 stars: 40 BRL
+        4-5 stars: 0 BRL
+        """
+        # Get reviews with scores
+        reviews = self.order.get_review_score()
+
+        # Get order items to link reviews to sellers
+        order_items = self.data['order_items'][['order_id', 'seller_id']].drop_duplicates()
+
+        # Merge to get all reviews per seller
+        seller_reviews = order_items.merge(reviews, on='order_id')
+
+        # Map review scores to costs
+        review_cost_map = {
+            1: 100,  # 1 star: 100 BRL
+            2: 50,   # 2 stars: 50 BRL
+            3: 40,   # 3 stars: 40 BRL
+            4: 0,    # 4 stars: 0 BRL
+            5: 0     # 5 stars: 0 BRL
+        }
+
+        seller_reviews['review_cost'] = seller_reviews['review_score'].map(review_cost_map)
+
+        # Sum up the costs for each seller
+        review_costs = seller_reviews.groupby('seller_id')['review_cost'].sum().reset_index()
+        review_costs.columns = ['seller_id', 'cost_of_reviews']
+
+        return review_costs
+
+    def get_revenues(self):
+        """
+        Returns a DataFrame with:
+        'seller_id', 'subscription_revenue', 'sales_fee_revenue', 'revenues'
+
+        Calculates revenues based on:
+        - Subscription fee: 80 BRL per month per seller
+        - Sales fee: 10% of product price (excluding freight)
+        """
+        # Get base data needed for calculations
+        sales_data = self.get_sales()  # Contains 'seller_id' and 'sales'
+        dates_data = self.get_active_dates()  # Contains 'seller_id' and 'months_on_olist'
+
+        # Merge the data
+        revenues_df = sales_data.reset_index().merge(
+            dates_data.reset_index(), on='seller_id', how='inner'
+        )
+
+        # Calculate subscription revenue - 80 BRL per month per seller
+        revenues_df['subscription_revenue'] = revenues_df['months_on_olist'] * 80
+
+        # Calculate sales fee - 10% of product price (excluding freight)
+        revenues_df['sales_fee_revenue'] = revenues_df['sales'] * 0.1
+
+        # Calculate total revenue
+        revenues_df['revenues'] = revenues_df['subscription_revenue'] + revenues_df['sales_fee_revenue']
+
+        return revenues_df[['seller_id', 'subscription_revenue', 'sales_fee_revenue', 'revenues']]
 
     def get_training_data(self):
         """
@@ -150,23 +242,39 @@ class Seller:
         ['seller_id', 'seller_city', 'seller_state', 'delay_to_carrier',
         'wait_time', 'date_first_sale', 'date_last_sale', 'months_on_olist', 'share_of_one_stars',
         'share_of_five_stars', 'review_score', 'n_orders', 'quantity',
-        'quantity_per_order', 'sales']
+        'quantity_per_order', 'sales', 'subscription_revenue', 'sales_fee_revenue',
+        'revenues', 'cost_of_reviews', 'profits']
         """
-
-        training_set =\
-            self.get_seller_features()\
+        # Get basic training data
+        training_set = \
+            self.get_seller_features() \
                 .merge(
                 self.get_seller_delay_wait_time(), on='seller_id'
-               ).merge(
-                self.get_active_dates(), on='seller_id'
-               ).merge(
+            ).merge(
+                self.get_active_dates().reset_index(), on='seller_id'
+            ).merge(
                 self.get_quantity(), on='seller_id'
-               ).merge(
-                self.get_sales(), on='seller_id'
-               )
+            ).merge(
+                self.get_sales().reset_index(), on='seller_id'
+            )
 
-        if self.get_review_score() is not None:
-            training_set = training_set.merge(self.get_review_score(),
-                                              on='seller_id')
+        # Add review scores if available
+        review_scores = self.get_review_score()
+        if review_scores is not None and not review_scores.empty:
+            training_set = training_set.merge(review_scores, on='seller_id', how='left')
+
+        # Add revenue information
+        revenues = self.get_revenues()
+        training_set = training_set.merge(revenues, on='seller_id', how='left')
+
+        # Add review costs
+        review_costs = self.get_review_costs()
+        training_set = training_set.merge(review_costs, on='seller_id', how='left')
+
+        # Fill NaN costs (sellers with no reviews) with 0
+        training_set['cost_of_reviews'] = training_set['cost_of_reviews'].fillna(0)
+
+        # Calculate profits
+        training_set['profits'] = training_set['revenues'] - training_set['cost_of_reviews']
 
         return training_set
